@@ -1,0 +1,1203 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Four-Lane Multi-Bus, Car and Pedestrian Priority Simulation</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    background: #1a1a1a;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: flex-start;
+    min-height: 100vh;
+    padding: 2rem 1rem;
+    font-family: "Segoe UI", system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+    color: #e0e0e0;
+  }
+  h1 {
+    font-size: 1.22rem;
+    font-weight: 560;
+    margin-bottom: 1.1rem;
+    color: #ddd;
+    letter-spacing: .02em;
+    text-align: center;
+  }
+  #canvas {
+    display: block;
+    border-radius: 10px;
+    box-shadow: 0 4px 24px #0008;
+    max-width: 100%;
+    height: auto;
+    background: #2d5e28;
+  }
+  #controls {
+    display: flex;
+    gap: 10px;
+    margin-top: 14px;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: center;
+    max-width: 940px;
+  }
+  button {
+    background: #2a2a2a;
+    color: #ddd;
+    border: 1px solid #444;
+    padding: 8px 15px;
+    border-radius: 6px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: background .15s, border-color .15s, transform .05s;
+  }
+  button:hover { background: #3a3a3a; border-color: #555; }
+  button:active { transform: translateY(1px); }
+  #btn-request-pedestrian { border-color: #77612d; }
+  #speed-label { font-size: 13px; color: #999; display: inline-flex; gap: 4px; align-items: center; }
+  #state-display {
+    margin-top: 12px;
+    background: #222;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 13px;
+    color: #aaa;
+    line-height: 1.7;
+    max-width: 940px;
+    width: 100%;
+  }
+  #state-display b { color: #eee; font-weight: 600; }
+  .badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 20px;
+    display: inline-block;
+    text-transform: uppercase;
+    letter-spacing: .03em;
+    white-space: nowrap;
+  }
+  .badge-green { background: #1d6e3a; color: #8ee0a6; }
+  .badge-red   { background: #6e1d1d; color: #f09a9a; }
+  .badge-wait  { background: #69551b; color: #f0d889; }
+  .badge-blue  { background: #1c3f68; color: #9fcaff; }
+  .badge-purple { background: #4e3469; color: #d6b8ff; }
+  #legend {
+    margin-top: 16px;
+    font-size: 12px;
+    color: #777;
+    max-width: 940px;
+    width: 100%;
+    line-height: 1.8;
+  }
+  #legend span { margin-right: 14px; white-space: nowrap; }
+</style>
+</head>
+<body>
+<h1>Four-Lane Multi-Bus, Car and Pedestrian Interaction — Bus Priority Simulation</h1>
+
+<canvas id="canvas" width="940" height="540"></canvas>
+
+<div id="controls">
+  <button id="btn-spawn-bus-east" type="button">Spawn bus →</button>
+  <button id="btn-spawn-bus-west" type="button">Spawn bus ←</button>
+  <button id="btn-spawn-bus-random" type="button">Spawn random bus</button>
+  <button id="btn-spawn-car-east" type="button">Add car →</button>
+  <button id="btn-spawn-car-west" type="button">Add car ←</button>
+  <button id="btn-spawn-car-random" type="button">Add random car</button>
+  <button id="btn-request-pedestrian" type="button">Request pedestrian crossing</button>
+  <button id="btn-reset" type="button">Reset</button>
+  <span id="speed-label">Speed: <span id="spd-val">1×</span></span>
+  <input type="range" min="1" max="4" step="1" value="1" id="speed-slider" style="width:90px; accent-color:#5a9;" />
+</div>
+
+<div id="state-display">
+  <span id="status-text">Idle — road is green and pedestrian crossing is red.</span>
+</div>
+
+<div id="legend">
+  <span>4 lanes total: 2 lanes ← and 2 lanes →</span>
+  <span>4 bus stops: before/after crossing for each direction</span>
+  <span>Single zebra crossing spans all lanes</span>
+  <span>🟨 Yellow zones = stop buffers on both approaches</span>
+  <span>Priority: buses &gt; pedestrian &gt; cars</span>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  const canvas = document.getElementById("canvas");
+  const ctx = canvas.getContext("2d");
+
+  const W = canvas.width;
+  const H = canvas.height;
+  const ROAD_Y = 160;
+  const ROAD_H = 168;
+  const LANE_COUNT = 4;
+  const LANE_H = ROAD_H / LANE_COUNT;
+  const CENTER_Y = ROAD_Y + ROAD_H / 2;
+
+  // Lanes 0 and 1 travel left. Lanes 2 and 3 travel right.
+  const WESTBOUND_LANES = [0, 1];
+  const EASTBOUND_LANES = [2, 3];
+  const WEST_BUS_LANE = 0;
+  const EAST_BUS_LANE = 3;
+
+  const CROSSING_X = 432;
+  const CROSSING_W = 70;
+  const EAST_STOP_X = CROSSING_X - 96;                 // for vehicles travelling →
+  const WEST_STOP_X = CROSSING_X + CROSSING_W + 96;    // for vehicles travelling ←
+  const CAR_GAP = 12;
+  const BUS_GAP = 18;
+
+  const STATION_W = 122;
+  const TOP_STATION_Y = ROAD_Y - 78;
+  const BOTTOM_STATION_Y = ROAD_Y + ROAD_H + 34;
+  const LEFT_STATION_X = 128;
+  const RIGHT_STATION_X = 690;
+
+  // Eastbound buses: A before crossing on the left, B after crossing on the right.
+  // Westbound buses: A before crossing on the right, B after crossing on the left.
+  const BUS_W = 100;
+  const BUS_H = 34;
+  const EAST_BEFORE_X = LEFT_STATION_X + 11;
+  const EAST_AFTER_X = RIGHT_STATION_X + 11;
+  const WEST_BEFORE_X = RIGHT_STATION_X + STATION_W - BUS_W - 11;
+  const WEST_AFTER_X = LEFT_STATION_X + STATION_W - BUS_W - 11;
+
+  const PED_START_X = CROSSING_X + CROSSING_W / 2;
+  const PED_START_Y = ROAD_Y - 50;
+  const PED_FINISH_Y = ROAD_Y + ROAD_H + 60;
+
+  const PEDESTRIAN_REQUEST_DELAY_SEC = 1.5;
+  const BUS_CLEAR_TO_PED_GREEN_DELAY_SEC = 1.5;
+  const BUS_DWELL_BEFORE_SEC = 1.15;
+  const BUS_DWELL_AFTER_SEC = 1.7;
+  const PEDESTRIAN_DONE_CLEAR_SEC = 0.45;
+
+  const MAX_CARS = 24;
+  const MAX_BUSES = 10;
+
+  let simSpeed = 1;
+  let buses = [];
+  let cars = [];
+  let pedestrian = null;
+  let lastFrameTime = null;
+  let elapsedForWalkAnimation = 0;
+  let nextEastLaneIndex = 0;
+  let nextWestLaneIndex = 0;
+  let nextBusId = 1;
+
+  function byId(id) {
+    return document.getElementById(id);
+  }
+
+  function clamp(value, min, max) {
+    return Math.max(min, Math.min(max, value));
+  }
+
+  function roundedRect(context, x, y, width, height, radius) {
+    const r = Math.min(radius, width / 2, height / 2);
+    context.beginPath();
+    context.moveTo(x + r, y);
+    context.lineTo(x + width - r, y);
+    context.quadraticCurveTo(x + width, y, x + width, y + r);
+    context.lineTo(x + width, y + height - r);
+    context.quadraticCurveTo(x + width, y + height, x + width - r, y + height);
+    context.lineTo(x + r, y + height);
+    context.quadraticCurveTo(x, y + height, x, y + height - r);
+    context.lineTo(x, y + r);
+    context.quadraticCurveTo(x, y, x + r, y);
+    context.closePath();
+  }
+
+  function laneCenterY(lane) {
+    return ROAD_Y + lane * LANE_H + LANE_H / 2;
+  }
+
+  function laneVehicleY(lane, vehicleHeight) {
+    return laneCenterY(lane) - vehicleHeight / 2;
+  }
+
+  function directionName(direction) {
+    return direction === 1 ? "eastbound" : "westbound";
+  }
+
+  function directionArrow(direction) {
+    return direction === 1 ? "→" : "←";
+  }
+
+  function vehicleGap(a, b) {
+    return a.type === "bus" || b.type === "bus" ? BUS_GAP : CAR_GAP;
+  }
+
+  function mkBus(direction, startX) {
+    const lane = direction === 1 ? EAST_BUS_LANE : WEST_BUS_LANE;
+    const beforeStopX = direction === 1 ? EAST_BEFORE_X : WEST_BEFORE_X;
+    const afterStopX = direction === 1 ? EAST_AFTER_X : WEST_AFTER_X;
+    const offscreenX = direction === 1 ? W + 160 : -170;
+
+    return {
+      id: nextBusId++,
+      type: "bus",
+      x: typeof startX === "number" ? startX : (direction === 1 ? -135 : W + 135),
+      y: laneVehicleY(lane, BUS_H),
+      w: BUS_W,
+      h: BUS_H,
+      lane,
+      direction,
+      beforeStopX,
+      afterStopX,
+      offscreenX,
+      speed: 86,
+      phase: "approach", // approach -> at_before -> crossing -> at_after -> leaving
+      phaseTimer: 0,
+      stopped: false,
+      color: direction === 1 ? "#185FA5" : "#7B3FA3"
+    };
+  }
+
+  function mkCar(direction, lane, startX) {
+    const palette = ["#B85A30", "#3B6D11", "#854F0B", "#533AB7", "#0F6E56", "#993556", "#9C8A2D", "#2F708A"];
+    const h = 28;
+    return {
+      type: "car",
+      x: typeof startX === "number" ? startX : (direction === 1 ? -70 : W + 70),
+      y: laneVehicleY(lane, h),
+      w: 50,
+      h,
+      lane,
+      direction,
+      speed: 112 + Math.random() * 28,
+      stopped: false,
+      color: palette[Math.floor(Math.random() * palette.length)]
+    };
+  }
+
+  function mkPedestrian() {
+    return {
+      x: PED_START_X,
+      y: PED_START_Y,
+      speed: 58,
+      phase: "request_delay", // request_delay -> waiting -> crossing -> done
+      requestTimer: 0,
+      doneTimer: 0
+    };
+  }
+
+  function pedestrianExists() {
+    return pedestrian !== null;
+  }
+
+  function pedestrianIsActive() {
+    return pedestrian !== null && pedestrian.phase !== "done";
+  }
+
+  function pedestrianIsCrossing() {
+    return pedestrian !== null && pedestrian.phase === "crossing";
+  }
+
+  function pedestrianIsWaitingForStart() {
+    return pedestrian !== null && (pedestrian.phase === "request_delay" || pedestrian.phase === "waiting");
+  }
+
+  function pedestrianRequestDelayDone() {
+    return pedestrian !== null && pedestrian.requestTimer >= PEDESTRIAN_REQUEST_DELAY_SEC;
+  }
+
+  function busIsBeforeAfterStation(bus) {
+    return bus.phase === "approach" || bus.phase === "at_before" || bus.phase === "crossing";
+  }
+
+  function anyBusBeforeAfterStation() {
+    if (pedestrianIsCrossing()) return false;
+    return buses.some(busIsBeforeAfterStation);
+  }
+
+  function anyBusInPostClearDelay() {
+    if (pedestrianIsCrossing()) return false;
+    return buses.some(function (bus) {
+      return bus.phase === "at_after" && bus.phaseTimer < BUS_CLEAR_TO_PED_GREEN_DELAY_SEC;
+    });
+  }
+
+  function busBlocksPedestrianStart() {
+    return anyBusBeforeAfterStation() || anyBusInPostClearDelay();
+  }
+
+  function isPedGreen() {
+    if (!pedestrianIsActive()) return false;
+    if (pedestrianIsCrossing()) return true;
+    return pedestrianRequestDelayDone() && !busBlocksPedestrianStart();
+  }
+
+  function isPedPreparatoryStop() {
+    // Once all buses have physically cleared the crossing corridor, cars stop during
+    // the pedestrian request delay / bus-clear delay so the pedestrian does not step
+    // into live traffic when the light turns green.
+    return pedestrianIsWaitingForStart() && !anyBusBeforeAfterStation();
+  }
+
+  function isRoadGreen() {
+    if (pedestrianIsCrossing()) return false;
+    if (isPedPreparatoryStop()) return false;
+    return true;
+  }
+
+  function requestPedestrian() {
+    if (!pedestrianExists() || pedestrian.phase === "done") {
+      pedestrian = mkPedestrian();
+    }
+  }
+
+  function allVehicles() {
+    return cars.concat(buses);
+  }
+
+  function chooseEastLane() {
+    const lane = EASTBOUND_LANES[nextEastLaneIndex % EASTBOUND_LANES.length];
+    nextEastLaneIndex += 1;
+    return lane;
+  }
+
+  function chooseWestLane() {
+    const lane = WESTBOUND_LANES[nextWestLaneIndex % WESTBOUND_LANES.length];
+    nextWestLaneIndex += 1;
+    return lane;
+  }
+
+  function spawnBus(direction) {
+    if (buses.length >= MAX_BUSES) return;
+
+    const lane = direction === 1 ? EAST_BUS_LANE : WEST_BUS_LANE;
+    const temp = { type: "bus", direction, lane, w: BUS_W };
+    let startX = direction === 1 ? -135 : W + 135;
+
+    for (const vehicle of allVehicles()) {
+      if (vehicle.direction !== direction || vehicle.lane !== lane) continue;
+      if (direction === 1 && vehicle.x < 155) {
+        startX = Math.min(startX, vehicle.x - BUS_W - vehicleGap(temp, vehicle));
+      }
+      if (direction === -1 && vehicle.x > W - 155) {
+        startX = Math.max(startX, vehicle.x + vehicle.w + vehicleGap(temp, vehicle));
+      }
+    }
+
+    buses.push(mkBus(direction, startX));
+  }
+
+  function spawnRandomBus() {
+    spawnBus(Math.random() < 0.5 ? 1 : -1);
+  }
+
+  function spawnCar(direction) {
+    if (cars.length >= MAX_CARS) return;
+
+    const lane = direction === 1 ? chooseEastLane() : chooseWestLane();
+    const temp = { type: "car", direction, lane, w: 50 };
+    let startX = direction === 1 ? -72 : W + 72;
+
+    for (const vehicle of allVehicles()) {
+      if (vehicle.direction !== direction || vehicle.lane !== lane) continue;
+      if (direction === 1 && vehicle.x < 105) {
+        startX = Math.min(startX, vehicle.x - temp.w - vehicleGap(temp, vehicle));
+      }
+      if (direction === -1 && vehicle.x > W - 105) {
+        startX = Math.max(startX, vehicle.x + vehicle.w + vehicleGap(temp, vehicle));
+      }
+    }
+
+    cars.push(mkCar(direction, lane, startX));
+  }
+
+  function spawnRandomCar() {
+    spawnCar(Math.random() < 0.5 ? 1 : -1);
+  }
+
+  function resetSimulation() {
+    buses = [];
+    cars = [];
+    pedestrian = null;
+    lastFrameTime = null;
+    elapsedForWalkAnimation = 0;
+    nextEastLaneIndex = 0;
+    nextWestLaneIndex = 0;
+    nextBusId = 1;
+    updateHUD();
+  }
+
+  function reachedTarget(vehicle, targetX) {
+    return vehicle.direction === 1 ? vehicle.x >= targetX - 0.25 : vehicle.x <= targetX + 0.25;
+  }
+
+  function snapToTarget(vehicle, targetX) {
+    vehicle.x = targetX;
+    vehicle.stopped = false;
+  }
+
+  function obstacleLimit(vehicle, targetX) {
+    let limit = targetX;
+
+    for (const other of allVehicles()) {
+      if (other === vehicle) continue;
+      if (other.direction !== vehicle.direction || other.lane !== vehicle.lane) continue;
+
+      const gap = vehicleGap(vehicle, other);
+      if (vehicle.direction === 1 && other.x > vehicle.x) {
+        limit = Math.min(limit, other.x - vehicle.w - gap);
+      }
+      if (vehicle.direction === -1 && other.x < vehicle.x) {
+        limit = Math.max(limit, other.x + other.w + gap);
+      }
+    }
+
+    return limit;
+  }
+
+  function moveVehicleToward(vehicle, targetX, moveDistance) {
+    const limitedTarget = obstacleLimit(vehicle, targetX);
+
+    if (vehicle.direction === 1) {
+      const nextX = Math.min(vehicle.x + moveDistance, limitedTarget);
+      vehicle.stopped = Math.abs(nextX - vehicle.x) < 0.01 && vehicle.x < targetX - 0.25;
+      vehicle.x = nextX;
+      return;
+    }
+
+    const nextX = Math.max(vehicle.x - moveDistance, limitedTarget);
+    vehicle.stopped = Math.abs(nextX - vehicle.x) < 0.01 && vehicle.x > targetX + 0.25;
+    vehicle.x = nextX;
+  }
+
+  function updateBus(bus, dt) {
+    bus.phaseTimer += dt;
+    const move = bus.speed * simSpeed * dt;
+
+    if (bus.phase === "approach") {
+      moveVehicleToward(bus, bus.beforeStopX, move);
+      if (reachedTarget(bus, bus.beforeStopX)) {
+        snapToTarget(bus, bus.beforeStopX);
+        bus.phase = "at_before";
+        bus.phaseTimer = 0;
+      }
+      return;
+    }
+
+    if (bus.phase === "at_before") {
+      // Pedestrian requests do not stop a bus at the before-crossing stop.
+      // A pedestrian who is already walking does stop it here.
+      if (!pedestrianIsCrossing() && bus.phaseTimer >= BUS_DWELL_BEFORE_SEC) {
+        bus.phase = "crossing";
+        bus.phaseTimer = 0;
+      }
+      return;
+    }
+
+    if (bus.phase === "crossing") {
+      moveVehicleToward(bus, bus.afterStopX, move);
+      if (reachedTarget(bus, bus.afterStopX)) {
+        snapToTarget(bus, bus.afterStopX);
+        bus.phase = "at_after";
+        bus.phaseTimer = 0;
+      }
+      return;
+    }
+
+    if (bus.phase === "at_after") {
+      if (bus.phaseTimer >= BUS_DWELL_AFTER_SEC) {
+        bus.phase = "leaving";
+        bus.phaseTimer = 0;
+      }
+      return;
+    }
+
+    if (bus.phase === "leaving") {
+      moveVehicleToward(bus, bus.offscreenX, move);
+    }
+  }
+
+  function updateBuses(dt) {
+    // Front-most buses are updated first inside each direction to preserve queue order.
+    buses.sort(function (a, b) {
+      if (a.direction !== b.direction) return b.direction - a.direction;
+      return a.direction === 1 ? b.x - a.x : a.x - b.x;
+    });
+
+    for (const bus of buses) {
+      updateBus(bus, dt);
+    }
+
+    buses = buses.filter(function (bus) {
+      return bus.direction === 1 ? bus.x < W + 150 : bus.x > -160;
+    });
+  }
+
+  function updatePedestrian(dt) {
+    if (!pedestrian) return;
+
+    if (pedestrian.phase === "request_delay") {
+      pedestrian.requestTimer += dt;
+      if (pedestrian.requestTimer >= PEDESTRIAN_REQUEST_DELAY_SEC) {
+        pedestrian.requestTimer = PEDESTRIAN_REQUEST_DELAY_SEC;
+        pedestrian.phase = "waiting";
+      }
+    }
+
+    if (pedestrian.phase === "waiting" && isPedGreen()) {
+      pedestrian.phase = "crossing";
+    }
+
+    if (pedestrian.phase === "crossing") {
+      pedestrian.y += pedestrian.speed * simSpeed * dt;
+      if (pedestrian.y >= PED_FINISH_Y) {
+        pedestrian.y = PED_FINISH_Y;
+        pedestrian.phase = "done";
+        pedestrian.doneTimer = 0;
+      }
+      return;
+    }
+
+    if (pedestrian.phase === "done") {
+      pedestrian.doneTimer += dt;
+      if (pedestrian.doneTimer >= PEDESTRIAN_DONE_CLEAR_SEC) {
+        pedestrian = null;
+      }
+    }
+  }
+
+  function laneVehicles(lane, direction) {
+    return allVehicles().filter(function (vehicle) {
+      return vehicle.lane === lane && vehicle.direction === direction;
+    });
+  }
+
+  function updateEastboundLane(laneCars, dt, roadGreen) {
+    laneCars.sort(function (a, b) { return b.x - a.x; });
+    let queuedBeforeStopLine = 0;
+    const moveScale = simSpeed * dt;
+
+    for (const car of laneCars) {
+      const carFront = car.x + car.w;
+      const hasNotCrossedStopLine = carFront <= EAST_STOP_X + 0.5;
+      const freeTarget = obstacleLimit(car, W + 150);
+
+      if (!roadGreen && hasNotCrossedStopLine) {
+        const stopTarget = EAST_STOP_X - car.w - queuedBeforeStopLine * (car.w + CAR_GAP);
+        const targetX = Math.min(stopTarget, freeTarget);
+        const nextX = Math.min(car.x + car.speed * moveScale, targetX);
+        car.stopped = Math.abs(nextX - targetX) < 0.35;
+        car.x = nextX;
+        queuedBeforeStopLine += 1;
+        continue;
+      }
+
+      car.stopped = false;
+      car.x = Math.min(car.x + car.speed * moveScale, freeTarget);
+    }
+  }
+
+  function updateWestboundLane(laneCars, dt, roadGreen) {
+    laneCars.sort(function (a, b) { return a.x - b.x; });
+    let queuedBeforeStopLine = 0;
+    const moveScale = simSpeed * dt;
+
+    for (const car of laneCars) {
+      const hasNotCrossedStopLine = car.x >= WEST_STOP_X - 0.5;
+      const freeTarget = obstacleLimit(car, -150);
+
+      if (!roadGreen && hasNotCrossedStopLine) {
+        const stopTarget = WEST_STOP_X + queuedBeforeStopLine * (car.w + CAR_GAP);
+        const targetX = Math.max(stopTarget, freeTarget);
+        const nextX = Math.max(car.x - car.speed * moveScale, targetX);
+        car.stopped = Math.abs(nextX - targetX) < 0.35;
+        car.x = nextX;
+        queuedBeforeStopLine += 1;
+        continue;
+      }
+
+      car.stopped = false;
+      car.x = Math.max(car.x - car.speed * moveScale, freeTarget);
+    }
+  }
+
+  function updateCars(dt) {
+    const roadGreen = isRoadGreen();
+
+    for (let lane = 0; lane < LANE_COUNT; lane += 1) {
+      const direction = lane < 2 ? -1 : 1;
+      const laneCars = cars.filter(function (car) { return car.lane === lane && car.direction === direction; });
+      if (laneCars.length === 0) continue;
+
+      if (direction === 1) {
+        updateEastboundLane(laneCars, dt, roadGreen);
+      } else {
+        updateWestboundLane(laneCars, dt, roadGreen);
+      }
+    }
+
+    cars = cars.filter(function (car) {
+      return car.direction === 1 ? car.x < W + 140 : car.x > -140;
+    });
+  }
+
+  function update(dt) {
+    elapsedForWalkAnimation += dt * simSpeed;
+    updateBuses(dt);
+    updatePedestrian(dt);
+    updateCars(dt);
+    updateHUD();
+  }
+
+  function badge(color, text) {
+    const label = text || color;
+    let cls = "badge-red";
+    if (color === "green") cls = "badge-green";
+    if (color === "wait") cls = "badge-wait";
+    if (color === "blue") cls = "badge-blue";
+    if (color === "purple") cls = "badge-purple";
+    return `<span class="badge ${cls}">${label}</span>`;
+  }
+
+  function formatSeconds(value) {
+    return Math.max(0, value).toFixed(1) + "s";
+  }
+
+  function busCountsDescription() {
+    const east = buses.filter(function (bus) { return bus.direction === 1; }).length;
+    const west = buses.filter(function (bus) { return bus.direction === -1; }).length;
+    const blocking = buses.filter(busIsBeforeAfterStation).length;
+    const clearing = buses.filter(function (bus) { return bus.phase === "at_after" && bus.phaseTimer < BUS_CLEAR_TO_PED_GREEN_DELAY_SEC; }).length;
+    return `Buses: ${buses.length} active (${east} →, ${west} ←), ${blocking} before/inside crossing, ${clearing} in clear-delay`;
+  }
+
+  function pedestrianDescription() {
+    if (!pedestrian) return "No pedestrian request";
+    if (pedestrian.phase === "request_delay") {
+      return "Request delay " + formatSeconds(PEDESTRIAN_REQUEST_DELAY_SEC - pedestrian.requestTimer);
+    }
+    if (pedestrian.phase === "waiting") return "Pedestrian waiting on grass";
+    if (pedestrian.phase === "crossing") return "Pedestrian crossing all 4 lanes";
+    return "Pedestrian finished";
+  }
+
+  function activeRuleText() {
+    if (pedestrianIsCrossing()) {
+      return "<b>Pedestrian priority active:</b> cars in both directions stop until all four lanes are clear; any arriving bus waits at its before-crossing station.";
+    }
+
+    if (pedestrian !== null && pedestrian.phase === "request_delay" && anyBusBeforeAfterStation()) {
+      return `<b>Pedestrian request registered:</b> bus priority remains active. The pedestrian waits on grass while buses before/inside the crossing clear.`;
+    }
+
+    if (anyBusBeforeAfterStation()) {
+      return "<b>Bus priority active:</b> pedestrian crossing remains red until every active bus has reached its after-crossing station.";
+    }
+
+    if (pedestrianIsWaitingForStart() && anyBusInPostClearDelay()) {
+      return `<b>Buses have cleared the crossing:</b> cars stop and the pedestrian light turns green after the ${BUS_CLEAR_TO_PED_GREEN_DELAY_SEC.toFixed(1)}s safety delay.`;
+    }
+
+    if (pedestrian !== null && pedestrian.phase === "request_delay") {
+      return `<b>Pedestrian request registered:</b> cars stop during the ${formatSeconds(PEDESTRIAN_REQUEST_DELAY_SEC - pedestrian.requestTimer)} startup delay before walking begins.`;
+    }
+
+    if (pedestrianIsWaitingForStart() && isPedGreen()) {
+      return "<b>Pedestrian priority active:</b> cars in both directions stop and the pedestrian starts crossing.";
+    }
+
+    if (pedestrianIsWaitingForStart()) {
+      return "<b>Pedestrian waiting:</b> crossing is still red because the bus-clear safety delay is active.";
+    }
+
+    return "<b>Normal traffic:</b> all road lanes are open and the pedestrian crossing is red.";
+  }
+
+  function updateHUD() {
+    const road = isRoadGreen() ? badge("green") : badge("red");
+    const ped = isPedGreen() ? badge("green") : badge("red");
+    const status = byId("status-text");
+    status.innerHTML = `${activeRuleText()}<br>Road lanes ${road} &nbsp; Pedestrian ${ped} &nbsp; ${badge("blue", busCountsDescription())} &nbsp; ${badge("wait", pedestrianDescription())}`;
+  }
+
+  function drawGrass() {
+    ctx.fillStyle = "#2d5e28";
+    ctx.fillRect(0, 0, W, ROAD_Y);
+    ctx.fillStyle = "#397536";
+    ctx.fillRect(0, ROAD_Y + ROAD_H, W, H - ROAD_Y - ROAD_H);
+  }
+
+  function drawPedestrianWaitingArea() {
+    ctx.fillStyle = "#a8a8a8";
+    roundedRect(ctx, PED_START_X - 36, PED_START_Y - 28, 72, 52, 8);
+    ctx.fill();
+
+    ctx.fillStyle = "#bdbdbd";
+    ctx.fillRect(PED_START_X - 18, PED_START_Y + 23, 36, ROAD_Y - (PED_START_Y + 23));
+
+    ctx.fillStyle = "rgba(255,255,255,0.18)";
+    ctx.beginPath();
+    ctx.arc(PED_START_X, PED_START_Y + 4, 20, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.fillStyle = "#333";
+    ctx.font = "bold 9px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("WAIT", PED_START_X, PED_START_Y - 3);
+
+    ctx.fillStyle = "#e5e5e5";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.fillText("Waiting Area", PED_START_X, PED_START_Y - 36);
+  }
+
+  function drawRoad() {
+    ctx.fillStyle = "#4a4a4a";
+    ctx.fillRect(0, ROAD_Y, W, ROAD_H);
+
+    ctx.strokeStyle = "#9a9a9a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(0, ROAD_Y);
+    ctx.lineTo(W, ROAD_Y);
+    ctx.moveTo(0, ROAD_Y + ROAD_H);
+    ctx.lineTo(W, ROAD_Y + ROAD_H);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#eeeeee";
+    ctx.lineWidth = 2;
+    ctx.setLineDash([24, 16]);
+    for (let i = 1; i < LANE_COUNT; i += 1) {
+      const y = ROAD_Y + i * LANE_H;
+      if (Math.abs(y - CENTER_Y) < 0.1) continue;
+      ctx.beginPath();
+      ctx.moveTo(0, y);
+      ctx.lineTo(CROSSING_X, y);
+      ctx.moveTo(CROSSING_X + CROSSING_W, y);
+      ctx.lineTo(W, y);
+      ctx.stroke();
+    }
+    ctx.setLineDash([]);
+
+    ctx.strokeStyle = "#f4d35e";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(0, CENTER_Y - 4);
+    ctx.lineTo(CROSSING_X, CENTER_Y - 4);
+    ctx.moveTo(CROSSING_X + CROSSING_W, CENTER_Y - 4);
+    ctx.lineTo(W, CENTER_Y - 4);
+    ctx.moveTo(0, CENTER_Y + 4);
+    ctx.lineTo(CROSSING_X, CENTER_Y + 4);
+    ctx.moveTo(CROSSING_X + CROSSING_W, CENTER_Y + 4);
+    ctx.lineTo(W, CENTER_Y + 4);
+    ctx.stroke();
+
+    drawLaneLabels();
+  }
+
+  function drawLaneLabels() {
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.fillStyle = "rgba(255,255,255,0.60)";
+    ctx.textAlign = "left";
+    ctx.fillText("bus lane ←", 18, laneCenterY(0) + 4);
+    ctx.fillText("lane ←", 18, laneCenterY(1) + 4);
+    ctx.fillText("lane →", 18, laneCenterY(2) + 4);
+    ctx.fillText("bus lane →", 18, laneCenterY(3) + 4);
+  }
+
+  function drawSafetyBuffers() {
+    ctx.fillStyle = "rgba(240, 190, 60, 0.13)";
+    ctx.fillRect(EAST_STOP_X, ROAD_Y, CROSSING_X - EAST_STOP_X, ROAD_H);
+    ctx.fillRect(CROSSING_X + CROSSING_W, ROAD_Y, WEST_STOP_X - (CROSSING_X + CROSSING_W), ROAD_H);
+
+    ctx.strokeStyle = "rgba(240, 190, 60, 0.5)";
+    ctx.lineWidth = 1;
+    ctx.setLineDash([5, 5]);
+    ctx.strokeRect(EAST_STOP_X, ROAD_Y, CROSSING_X - EAST_STOP_X, ROAD_H);
+    ctx.strokeRect(CROSSING_X + CROSSING_W, ROAD_Y, WEST_STOP_X - (CROSSING_X + CROSSING_W), ROAD_H);
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = "rgba(255,235,170,0.9)";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+  }
+
+  function drawCrossing() {
+    ctx.fillStyle = "rgba(255,255,255,0.05)";
+    ctx.fillRect(CROSSING_X, ROAD_Y - 12, CROSSING_W, ROAD_H + 24);
+
+    const stripes = 8;
+    const stripeW = CROSSING_W / stripes;
+    for (let i = 0; i < stripes; i += 1) {
+      ctx.fillStyle = i % 2 === 0 ? "#f0ead8" : "#4a4a4a";
+      ctx.fillRect(CROSSING_X + i * stripeW, ROAD_Y, stripeW, ROAD_H);
+    }
+
+    ctx.strokeStyle = "rgba(255,255,255,0.8)";
+    ctx.lineWidth = 1;
+    ctx.strokeRect(CROSSING_X, ROAD_Y, CROSSING_W, ROAD_H);
+  }
+
+  function drawStopLines() {
+    ctx.strokeStyle = "#fff";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(EAST_STOP_X, ROAD_Y);
+    ctx.lineTo(EAST_STOP_X, ROAD_Y + ROAD_H);
+    ctx.moveTo(WEST_STOP_X, ROAD_Y);
+    ctx.lineTo(WEST_STOP_X, ROAD_Y + ROAD_H);
+    ctx.stroke();
+
+    ctx.fillStyle = "rgba(255,255,255,0.85)";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("→ stop line", EAST_STOP_X, ROAD_Y - 8);
+    ctx.fillText("← stop line", WEST_STOP_X, ROAD_Y - 8);
+  }
+
+  function drawStation(x, y, label, subtitle, direction, beforeCrossing) {
+    const col = direction === 1 ? (beforeCrossing ? "#185F8A" : "#1a6e35") : (beforeCrossing ? "#6A3B8F" : "#1b6b73");
+    ctx.fillStyle = col;
+    roundedRect(ctx, x, y, STATION_W, 38, 5);
+    ctx.fill();
+
+    ctx.fillStyle = "#c8e4f8";
+    ctx.fillRect(x + 5, y + 8, STATION_W - 10, 21);
+
+    ctx.fillStyle = "#222";
+    ctx.font = "bold 9px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x + STATION_W / 2, y + 17);
+    ctx.font = "8px Segoe UI, sans-serif";
+    ctx.fillText(subtitle, x + STATION_W / 2, y + 27);
+
+    const poleX = x + STATION_W / 2;
+    ctx.fillStyle = "#888";
+    if (y < ROAD_Y) {
+      ctx.fillRect(poleX - 1.5, y + 38, 3, ROAD_Y - (y + 38));
+      ctx.fillStyle = "#555";
+      ctx.fillRect(x - 6, ROAD_Y - 8, STATION_W + 12, 8);
+    } else {
+      ctx.fillRect(poleX - 1.5, ROAD_Y + ROAD_H, 3, y - (ROAD_Y + ROAD_H));
+      ctx.fillStyle = "#555";
+      ctx.fillRect(x - 6, ROAD_Y + ROAD_H, STATION_W + 12, 8);
+    }
+  }
+
+  function drawAllStations() {
+    drawStation(LEFT_STATION_X, TOP_STATION_Y, "W-B ←", "after crossing", -1, false);
+    drawStation(RIGHT_STATION_X, TOP_STATION_Y, "W-A ←", "before crossing", -1, true);
+    drawStation(LEFT_STATION_X, BOTTOM_STATION_Y, "E-A →", "before crossing", 1, true);
+    drawStation(RIGHT_STATION_X, BOTTOM_STATION_Y, "E-B →", "after crossing", 1, false);
+  }
+
+  function drawLight(x, y, green, label, poleToY) {
+    ctx.fillStyle = "#444";
+    ctx.fillRect(x - 1.5, y + 50, 3, poleToY - y - 50);
+
+    ctx.fillStyle = "#1a1a1a";
+    roundedRect(ctx, x - 12, y, 24, 50, 5);
+    ctx.fill();
+
+    ctx.strokeStyle = "#555";
+    ctx.lineWidth = 1;
+    roundedRect(ctx, x - 12, y, 24, 50, 5);
+    ctx.stroke();
+
+    ctx.fillStyle = green ? "#4a1a1a" : "#E24B4A";
+    ctx.beginPath();
+    ctx.arc(x, y + 13, 7, 0, Math.PI * 2);
+    ctx.fill();
+    if (!green) {
+      ctx.fillStyle = "rgba(226,75,74,0.30)";
+      ctx.beginPath();
+      ctx.arc(x, y + 13, 11, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = green ? "#63b522" : "#1a3a1a";
+    ctx.beginPath();
+    ctx.arc(x, y + 37, 7, 0, Math.PI * 2);
+    ctx.fill();
+    if (green) {
+      ctx.fillStyle = "rgba(99,181,34,0.30)";
+      ctx.beginPath();
+      ctx.arc(x, y + 37, 11, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "#ddd";
+    ctx.font = "9px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText(label, x, y - 4);
+  }
+
+  function drawBus(bus) {
+    ctx.save();
+    if (bus.direction === -1) {
+      ctx.translate(bus.x + bus.w / 2, bus.y + bus.h / 2);
+      ctx.scale(-1, 1);
+      ctx.translate(-(bus.x + bus.w / 2), -(bus.y + bus.h / 2));
+    }
+
+    ctx.fillStyle = bus.color;
+    roundedRect(ctx, bus.x, bus.y, bus.w, bus.h, 6);
+    ctx.fill();
+
+    ctx.fillStyle = "#b8d8f0";
+    for (let i = 0; i < 4; i += 1) {
+      ctx.fillRect(bus.x + 10 + i * 20, bus.y + 7, 14, 11);
+    }
+    ctx.fillRect(bus.x + bus.w - 16, bus.y + 7, 10, 11);
+
+    ctx.fillStyle = "#ffe96e";
+    ctx.fillRect(bus.x + bus.w - 5, bus.y + 11, 5, 8);
+
+    for (const wheelX of [bus.x + 16, bus.x + 78]) {
+      ctx.fillStyle = "#111";
+      ctx.beginPath();
+      ctx.arc(wheelX, bus.y + bus.h, 8, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#555";
+      ctx.beginPath();
+      ctx.arc(wheelX, bus.y + bus.h, 4.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    ctx.fillStyle = "#fff";
+    ctx.font = "bold 9px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("BUS " + directionArrow(bus.direction), bus.x + bus.w / 2, bus.y + bus.h - 7);
+
+    if (bus.stopped || bus.phase === "at_before" || bus.phase === "at_after") {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      const label = bus.phase === "at_before" ? "STOP A" : (bus.phase === "at_after" ? "STOP B" : "WAIT");
+      ctx.fillText(label, bus.x + bus.w / 2, bus.y - 4);
+    }
+  }
+
+  function drawCar(car) {
+    ctx.save();
+    if (car.direction === -1) {
+      ctx.translate(car.x + car.w / 2, car.y + car.h / 2);
+      ctx.scale(-1, 1);
+      ctx.translate(-(car.x + car.w / 2), -(car.y + car.h / 2));
+    }
+
+    ctx.fillStyle = car.color;
+    roundedRect(ctx, car.x, car.y, car.w, car.h, 4);
+    ctx.fill();
+
+    ctx.fillStyle = "rgba(190,220,245,0.72)";
+    ctx.fillRect(car.x + 7, car.y + 4, 13, 10);
+    ctx.fillRect(car.x + 28, car.y + 4, 13, 10);
+
+    ctx.fillStyle = "#ffe96e";
+    ctx.fillRect(car.x + car.w - 4, car.y + 8, 4, 7);
+
+    for (const wheelX of [car.x + 10, car.x + 38]) {
+      ctx.fillStyle = "#111";
+      ctx.beginPath();
+      ctx.arc(wheelX, car.y + car.h, 7, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.fillStyle = "#555";
+      ctx.beginPath();
+      ctx.arc(wheelX, car.y + car.h, 3.5, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+
+    if (car.stopped) {
+      ctx.fillStyle = "rgba(0,0,0,0.55)";
+      ctx.font = "bold 9px Segoe UI, sans-serif";
+      ctx.textAlign = "center";
+      ctx.fillText("STOP", car.x + car.w / 2, car.y - 4);
+    }
+  }
+
+  function drawPedestrian(ped) {
+    if (!ped || ped.phase === "done") return;
+
+    const px = ped.x;
+    const py = ped.y;
+    const walking = ped.phase === "crossing";
+    const swing = walking ? Math.sin(elapsedForWalkAnimation * 13) * 6 : 0;
+
+    if (ped.phase === "request_delay" || ped.phase === "waiting") {
+      ctx.fillStyle = ped.phase === "request_delay" ? "rgba(255,220,100,0.22)" : "rgba(120,210,120,0.18)";
+      ctx.beginPath();
+      ctx.arc(px, py + 4, 21, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    ctx.fillStyle = "#F5C4B3";
+    ctx.beginPath();
+    ctx.arc(px, py - 14, 6, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.strokeStyle = "#c8956a";
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.arc(px, py - 14, 6, 0, Math.PI * 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#3a6bcc";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(px, py - 8);
+    ctx.lineTo(px, py + 6);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#F5C4B3";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(px - 5, py - 2);
+    ctx.lineTo(px + 5, py - 2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#334";
+    ctx.lineWidth = 2.5;
+    ctx.beginPath();
+    ctx.moveTo(px, py + 6);
+    ctx.lineTo(px - 4 + swing, py + 16);
+    ctx.stroke();
+    ctx.beginPath();
+    ctx.moveTo(px, py + 6);
+    ctx.lineTo(px + 4 - swing, py + 16);
+    ctx.stroke();
+
+    ctx.fillStyle = "#eee";
+    ctx.font = "10px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    if (ped.phase === "request_delay") {
+      ctx.fillText("request delay " + formatSeconds(PEDESTRIAN_REQUEST_DELAY_SEC - ped.requestTimer), px, py - 31);
+    } else if (ped.phase === "waiting") {
+      ctx.fillText("waiting", px, py - 31);
+    }
+  }
+
+  function drawPriorityBanner() {
+    let text = "ROAD OPEN: traffic can continue in both directions";
+    if (pedestrianIsCrossing()) {
+      text = "PEDESTRIAN PRIORITY: all four lanes stop; arriving buses wait at A";
+    } else if (anyBusBeforeAfterStation()) {
+      text = "BUS PRIORITY: pedestrian waits until all buses reach their B stops";
+    } else if (pedestrianIsWaitingForStart() && anyBusInPostClearDelay()) {
+      text = "BUS CLEARED: 1.5 s safety delay before pedestrian green";
+    } else if (pedestrian !== null && pedestrian.phase === "request_delay") {
+      text = "PEDESTRIAN REQUEST: road stops during 1.5 s startup delay";
+    } else if (pedestrianIsWaitingForStart()) {
+      text = "PEDESTRIAN PRIORITY: preparing to cross all four lanes";
+    }
+
+    ctx.fillStyle = "rgba(0,0,0,0.44)";
+    roundedRect(ctx, 18, 18, 600, 30, 8);
+    ctx.fill();
+    ctx.fillStyle = "#eee";
+    ctx.font = "bold 12px Segoe UI, sans-serif";
+    ctx.textAlign = "left";
+    ctx.fillText(text, 31, 38);
+  }
+
+  function drawBusClearTimer() {
+    if (!pedestrianIsWaitingForStart()) return;
+    if (anyBusBeforeAfterStation()) return;
+
+    const clearingBuses = buses.filter(function (bus) {
+      return bus.phase === "at_after" && bus.phaseTimer < BUS_CLEAR_TO_PED_GREEN_DELAY_SEC;
+    });
+    if (clearingBuses.length === 0) return;
+
+    const minTimer = Math.min.apply(null, clearingBuses.map(function (bus) { return bus.phaseTimer; }));
+    const remaining = BUS_CLEAR_TO_PED_GREEN_DELAY_SEC - minTimer;
+    const pct = clamp(minTimer / BUS_CLEAR_TO_PED_GREEN_DELAY_SEC, 0, 1);
+    const x = CROSSING_X - 60;
+    const y = ROAD_Y + ROAD_H + 82;
+    const width = CROSSING_W + 120;
+
+    ctx.fillStyle = "rgba(0,0,0,0.35)";
+    roundedRect(ctx, x, y, width, 16, 7);
+    ctx.fill();
+    ctx.fillStyle = "rgba(120,210,120,0.75)";
+    roundedRect(ctx, x, y, width * pct, 16, 7);
+    ctx.fill();
+    ctx.fillStyle = "#f2f2f2";
+    ctx.font = "9px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("pedestrian green in " + formatSeconds(remaining), x + width / 2, y + 11);
+  }
+
+  function drawDirectionArrows() {
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = "bold 13px Segoe UI, sans-serif";
+    ctx.textAlign = "center";
+    ctx.fillText("←", W - 42, laneCenterY(0) + 5);
+    ctx.fillText("←", W - 42, laneCenterY(1) + 5);
+    ctx.fillText("→", W - 42, laneCenterY(2) + 5);
+    ctx.fillText("→", W - 42, laneCenterY(3) + 5);
+  }
+
+  function draw() {
+    ctx.clearRect(0, 0, W, H);
+    drawGrass();
+    drawPedestrianWaitingArea();
+    drawRoad();
+    drawSafetyBuffers();
+    drawCrossing();
+    drawStopLines();
+    drawAllStations();
+    drawBusClearTimer();
+
+    drawLight(EAST_STOP_X - 34, ROAD_Y - 76, isRoadGreen(), "road →", ROAD_Y);
+    drawLight(WEST_STOP_X + 34, ROAD_Y - 76, isRoadGreen(), "road ←", ROAD_Y);
+    drawLight(CROSSING_X + CROSSING_W + 30, ROAD_Y - 72, isPedGreen(), "ped", ROAD_Y);
+    drawLight(CROSSING_X - 30, ROAD_Y + ROAD_H + 16, isPedGreen(), "ped", BOTTOM_STATION_Y + 14);
+    drawDirectionArrows();
+
+    for (const car of cars) {
+      drawCar(car);
+    }
+    for (const bus of buses) {
+      drawBus(bus);
+    }
+    drawPedestrian(pedestrian);
+    drawPriorityBanner();
+  }
+
+  byId("btn-spawn-bus-east").addEventListener("click", function () { spawnBus(1); });
+  byId("btn-spawn-bus-west").addEventListener("click", function () { spawnBus(-1); });
+  byId("btn-spawn-bus-random").addEventListener("click", spawnRandomBus);
+  byId("btn-spawn-car-east").addEventListener("click", function () { spawnCar(1); });
+  byId("btn-spawn-car-west").addEventListener("click", function () { spawnCar(-1); });
+  byId("btn-spawn-car-random").addEventListener("click", spawnRandomCar);
+  byId("btn-request-pedestrian").addEventListener("click", requestPedestrian);
+  byId("btn-reset").addEventListener("click", resetSimulation);
+  byId("speed-slider").addEventListener("input", function (event) {
+    simSpeed = Number(event.target.value);
+    byId("spd-val").textContent = simSpeed + "×";
+  });
+
+  updateHUD();
+
+  function loop(timestamp) {
+    const now = typeof timestamp === "number" ? timestamp : Date.now();
+    if (lastFrameTime === null) {
+      lastFrameTime = now;
+    }
+    const dt = clamp((now - lastFrameTime) / 1000, 0, 0.05);
+    lastFrameTime = now;
+
+    update(dt);
+    draw();
+    window.requestAnimationFrame(loop);
+  }
+
+  window.requestAnimationFrame(loop);
+}());
+</script>
+</body>
+</html>
